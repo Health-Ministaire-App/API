@@ -4,9 +4,9 @@ const qrcode = require('qrcode')
 const sql = require("mssql");
 const cors = require('cors')
 const jwt = require('jsonwebtoken');
+
 const app = express()
 
-// Add the middleware to parse the request body
 app.use(express.json())
 
 require('dotenv').config();
@@ -36,60 +36,70 @@ const port = 3000
 
 const secrets = new Map();  
 
-function verifyToken(req, res, next) {
-  // Get the token from the Authorization header
-  
-  console.log(req.headers)
-  const token = req.headers['authorization']?.split(' ')[1];
 
-  if (!token || token === null) {
-    return res.status(403).send('No token provided.');
-  }
-
-  // Verify the token
-  jwt.verify(token, secretKey, (err, decoded) => {
-    if (err) {
-      return res.status(401).send('Failed to authenticate token.');
-    }
-
-    // If token is valid, save user info to request object for use in other routes
-    req.user = decoded;
-    next(); // Continue to the next middleware or route handler
-  });
-}
-
-
-// Connect to SQL Server
 sql.connect(config, err => {
   if (err) {
       console.log(err);
-      console.log("--------------------------------------------------------");
-      console.log("--------------------------------------------------------");
-      console.log("--------------------------------------------------------");
-      console.log("--------------------------------------------------------");
   }
   else{console.log("Connection Successful!");} 
 
 });
 
 
+function verifyToken(req, res, next) {
+  
+  const token = req.headers['authorization']?.split(' ')[1];
 
-// Define route for fetching data from SQL Server
+  if (!token || token === null) {
+    return res.status(403).send('No token provided.');
+  }
+
+  jwt.verify(token, secretKey, (err, decoded) => {
+    if (err) {
+      return res.status(401).send('Failed to authenticate token.');
+    }
+
+    req.user = decoded;
+    next();
+  });
+}
+
+function changeUserVariablesinDB(col, user, value, ifString){
+
+  const query = (ifString) 
+  ? `UPDATE dbo.P_Login SET ${col} = '${value}' WHERE user_name='${user}'`
+  : `UPDATE dbo.P_Login SET ${col} = ${value} WHERE user_name='${user}'`;
+
+  new sql.Request().query(query, (err, result) => {
+    if (err) { console.error("Error executing query:", err) } 
+  });
+
+}
+
+
 app.post("/getUserExistance", (request, response) => {
 
   const username = request.body.name
-  const password = request.body.password
+  // const password = request.body.password
+  // const hashedPassword = crypto.createHash('sha256').update(password).digest('hex');
   
-  if(!username){return response.status(401).send('Username Required') }
+  if(!username){ return response.status(401).send('Username Required') }
 
-  new sql.Request().query(`SELECT * FROM dbo.P_Login where user_name='${username}' `, (err, result) => {
+
+  // new sql.Request().query(`SELECT * FROM dbo.P_Login where user_name='${username}' and password = ${hashedPassword}`, (err, result) => {
+  new sql.Request().query(`SELECT * FROM dbo.P_Login where user_name='${username}'`, (err, result) => {
       
       if (err) { console.error("Error executing query:", err) } 
       
-      if (!result) { return response.status(401).send('Invalid Username') }
+      if (result.recordset.length === 0) { return response.status(401).send('Invalid Username') }
       
+
       const token = jwt.sign({ username: username }, secretKey, { expiresIn: '1h' });
 
+      changeUserVariablesinDB('token', username, token, true)
+
+      // const resultRes = result.recordset;
+      // response.json({ token , resultRes });
       response.json({ token });
     
   });
@@ -98,40 +108,31 @@ app.post("/getUserExistance", (request, response) => {
 
 
 
-// Generate a QR code for 2FA and return a JWT along with it
 app.post('/auth-qr', verifyToken, (req, res) => {
   const user = req.body.name;
 
-  console.log(req.body);
-  console.log(`name ${user}`);
-
-  // Generate a secret for the user for 2FA
   const secret = speakeasy.generateSecret({
     name: user,
   });
+  
+  changeUserVariablesinDB('mfa_secret_key', user, `CONVERT(VARBINARY, '${secret.base32}')`, false)
 
-  console.table(secret)
-
-  // Store the secret temporarily for the user
   secrets.set(user, secret.base32);
 
-  // Convert the secret into a QR code that the user can scan
   qrcode.toDataURL(secret.otpauth_url, (err, data) => {
+
     if (err) {
       console.error(err);
       return res.status(500).send('Error generating QR code');
     }
 
-    // Create a payload for the JWT that includes the user's name and 2FA status
     const payload = {
       name: user,
-      twoFactorAuthEnabled: false, // The user hasn't completed 2FA yet
+      twoFactorAuthEnabled: false,
     };
 
-    // Generate a JWT token (valid for 10 minutes)
     const token = jwt.sign(payload, secretKey, { expiresIn: '10m' });
 
-    // Send the QR code and the token back to the client
     res.json({
       qrCode: data,
       token,
@@ -145,11 +146,8 @@ app.post('/auth-qr', verifyToken, (req, res) => {
 
 app.post('/verify-token', verifyToken, (req, res) => {
 
-  console.table(req.body)
   const { code, name } = req.body;
   const storedSecret = secrets.get(name);
-
-  console.log(`Secret : ${storedSecret}`)
   
   const verified = speakeasy.totp.verify({
     secret: storedSecret,
@@ -159,10 +157,14 @@ app.post('/verify-token', verifyToken, (req, res) => {
   });
 
   if (verified) {
+    
+    changeUserVariablesinDB('actif', user, 1, false)
+
+    changeUserVariablesinDB('loged', user, 1, false)
+
     res.json({ message: 'Authentication successful' });
-  } else {
-    res.status(401).json({ message: 'Authentication failed' });
-  }
+
+  } else {res.status(401).json({ message: 'Authentication failed' });}
   
 });
 
